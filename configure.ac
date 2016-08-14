@@ -410,6 +410,11 @@ AC_ARG_ENABLE(shout,
 		[enables the shoutcast streaming output]),,
 	[enable_shout=auto])
 
+AC_ARG_ENABLE(songcast_output,
+	AS_HELP_STRING([--enable-songcast-output],
+		[enables the Songcast Sender output]),,
+	[enable_songcast_output=yes])
+
 AC_ARG_ENABLE(solaris_output,
 	AS_HELP_STRING([--enable-solaris-output],
 		[enables the Solaris /dev/audio output]),,
@@ -1257,6 +1262,10 @@ fi
 MPD_DEFINE_CONDITIONAL(enable_shout, HAVE_SHOUT,
 	[shoutcast output])
 
+dnl -------------------------------- Songcast ---------------------------------
+MPD_DEFINE_CONDITIONAL(enable_songcast_output, ENABLE_SONGCAST_OUTPUT,
+		[support for Songcast Sender])
+
 dnl --------------------------------- Solaris ---------------------------------
 
 MPD_DEFINE_CONDITIONAL(enable_solaris_output, ENABLE_SOLARIS_OUTPUT,
@@ -1468,6 +1477,7 @@ printf '\n\t'
 results(pulse, [PulseAudio])
 results(roar,[ROAR])
 results(shout, [SHOUTcast])
+results(songcast_output, [Songcast])
 results(solaris_output, [Solaris])
 results(winmm_output, [WinMM])
 

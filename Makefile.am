@@ -1489,6 +1489,11 @@ liboutput_plugins_a_SOURCES += \
 	src/output/plugins/httpd/HttpdOutputPlugin.hxx
 endif
 
+if ENABLE_SONGCAST_OUTPUT
+liboutput_plugins_a_SOURCES += \
+	src/output/plugins/SongcastOutputPlugin.cxx src/output/plugins/SongcastOutputPlugin.hxx
+endif
+
 if ENABLE_SOLARIS_OUTPUT
 liboutput_plugins_a_SOURCES += \
 	src/output/plugins/SolarisOutputPlugin.cxx src/output/plugins/SolarisOutputPlugin.hxx

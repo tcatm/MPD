@@ -37,6 +37,7 @@
 #include "plugins/RoarOutputPlugin.hxx"
 #include "plugins/ShoutOutputPlugin.hxx"
 #include "plugins/sles/SlesOutputPlugin.hxx"
+#include "plugins/SongcastOutputPlugin.hxx"
 #include "plugins/SolarisOutputPlugin.hxx"
 #include "plugins/WinmmOutputPlugin.hxx"
 
@@ -79,6 +80,9 @@ const AudioOutputPlugin *const audio_output_plugins[] = {
 #endif
 #ifdef HAVE_OSX
 	&osx_output_plugin,
+#endif
+#ifdef ENABLE_SONGCAST_OUTPUT
+	&songcast_output_plugin,
 #endif
 #ifdef ENABLE_SOLARIS_OUTPUT
 	&solaris_output_plugin,
