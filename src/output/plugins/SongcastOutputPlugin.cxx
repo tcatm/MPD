@@ -214,7 +214,6 @@ struct SongcastOutput final {
 	unsigned Delay() const;
 	void SendTag(const Tag &tag);
 	size_t Play(const void *chunk, size_t size, Error &error);
-	void Cancel();
 
 	void ohz_thread();
 	void handle_ohz();
@@ -338,6 +337,8 @@ fail_ohz:
 inline void
 SongcastOutput::Disable()
 {
+	// send event to thread
+
 	pcm_export.Destruct();
 
 	// TODO stop ohz_thread
@@ -604,8 +605,8 @@ void SongcastOutput::handle_ohm()
 		}
 	}
 
-	if (header.type == OHM1_FRAME_REQUEST) {
-		ohm1_frame_request *request = (ohm1_frame_request*)buffer;
+	if (header.type == OHM1_RESEND_REQUEST) {
+		ohm1_resend_request *request = (ohm1_resend_request*)buffer;
 		int count = ntohl(request->count);
 
 		printf("resent request %i\n", count);
@@ -614,14 +615,6 @@ void SongcastOutput::handle_ohm()
 			handle_resent_request(ntohl(request->data[i]));
 	}
 
-	// TODO handle type 7 (probably resent request)
-	// TODO keep a history of all sent packets within the latency
-	//      a fast ringbuffer may be useful
-	//      this buffer can probably be static
-	//      chunking the audio to fit into MTU may be helpful here
-	//      to haven an upper bound for how much memory will be
-	//      needed reduce the potential packet loss
-	//      std::deque with a list of pointers to frames?
 
   // share sendmsg for track and metatext with unicast and multicast
 
@@ -815,16 +808,6 @@ SongcastOutput::Play(const void *chunk, size_t size, gcc_unused Error &error)
 	return source_size;
 }
 
-inline void
-SongcastOutput::Cancel()
-{
-	// calculate how many frames have been sent within latency
-	// resent them with halt flag set and no data
-
-	// This seems to confuse the DSM.
-	return;
-}
-
 void
 SongcastOutput::handle_resent_request(unsigned int frameindex)
 {
@@ -935,7 +918,7 @@ const struct AudioOutputPlugin songcast_output_plugin = {
 	&Wrapper::SendTag,
 	&Wrapper::Play,
 	nullptr,
-	&Wrapper::Cancel,
+	nullptr,
 	nullptr,
 	nullptr,
 };

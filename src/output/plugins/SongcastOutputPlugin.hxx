@@ -70,7 +70,7 @@ enum {
 	OHM1_TRACK,
 	OHM1_METATEXT,
 	OHM1_SLAVE,
-	OHM1_FRAME_REQUEST,
+	OHM1_RESEND_REQUEST,
 };
 
 #define OHM1_FLAG_HALT (1<<0)
@@ -131,7 +131,7 @@ typedef struct __attribute__((__packed__)) {
 typedef struct __attribute__((__packed__)) {
 	uint32_t count;
 	uint32_t data[];
-} ohm1_frame_request;
+} ohm1_resend_request;
 
 struct audio_frame_options {
 	int channels;
