@@ -31,6 +31,7 @@
 #include "Log.hxx"
 
 #include <thread>
+#include <mutex>
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
@@ -84,6 +85,77 @@ private:
 	}
 };
 
+class RingBuffer final {
+public:
+	RingBuffer() {
+		entries = 0;
+	}
+
+	~RingBuffer() {
+		free(buffer);
+	}
+
+	void resize(size_t nmemb, size_t size) {
+		printf("resizing RingBuffer\n");
+		entries = nmemb;
+		entry_size = size;
+		writeptr = 0;
+		buffer = (uint8_t*)calloc(nmemb, size);
+	}
+
+	void put(struct cached_frame* data) {
+		m.lock();
+
+		memcpy((void*)buffer + writeptr * entry_size, data, entry_size);
+
+		writeptr++;
+		if (writeptr >= entries)
+			writeptr = 0;
+
+		m.unlock();
+	}
+
+	// May return nullptr
+	// It is up to the caller to free the returned data
+	struct cached_frame *get(unsigned int index) {
+		m.lock();
+
+		int offset = -1;
+
+		for (int i = 0; i < entries;  i++) {
+			struct cached_frame *frame = (struct cached_frame*)(buffer + i * entry_size);
+			if (frame->index == index) {
+				offset = i * entry_size;
+				break;
+			}
+		}
+
+		if (offset < 0) {
+			m.unlock();
+			return nullptr;
+		}
+
+		struct cached_frame *ret = (struct cached_frame*)malloc(entry_size);
+
+		if (ret == nullptr) {
+			m.unlock();
+			return nullptr;
+		}
+
+		memcpy(ret, (void*)buffer + offset, entry_size);
+
+		m.unlock();
+
+		return ret;
+	}
+private:
+	uint8_t *buffer;
+	size_t entries;
+	size_t entry_size;
+	unsigned int writeptr;
+	std::mutex m;
+};
+
 struct SongcastOutput final {
 	AudioOutput base;
 
@@ -95,10 +167,11 @@ struct SongcastOutput final {
 
 	std::string ohz_uri;
 
-	ohm1_audio frame;
+	struct audio_frame_options frame_options;
 	uint32_t framecounter;
-	const char *codec = "PCM";
-	size_t framesize;
+	size_t in_frame_size;
+	size_t out_frame_size;
+	size_t chunk_size;
 
 	State state;
 	ExpiringTimer alive_timer;
@@ -108,6 +181,10 @@ struct SongcastOutput final {
 	Manual<PcmExport> pcm_export;
 
 	std::thread t;
+
+	struct cached_frame *cache;
+
+	RingBuffer ringbuffer;
 
   // TODO structs for track and metatext might be useful
 	std::string track_sequence, track_uri, track_metadata, metatext_sequence, metatext;
@@ -142,6 +219,9 @@ struct SongcastOutput final {
 	void ohz_thread();
 	void handle_ohz();
 	void handle_ohm();
+
+	void send_audio_frame(unsigned int frameindex, const void *chunk, size_t size, struct audio_frame_options *options, uint8_t flags);
+	void handle_resent_request(unsigned int frameindex);
 };
 
 SongcastOutput *
@@ -222,21 +302,21 @@ SongcastOutput::Enable(Error &error)
 	}
 
 	src.sin_family = AF_INET;
-	src.sin_port = unicast ? 0 : htons(51973);
-	src.sin_addr.s_addr = htonl(INADDR_ANY);
+	if (!unicast) {
+		src.sin_port = htons(51973);
+		src.sin_addr.s_addr = inet_addr((std::string("239.255.") + std::to_string(channel)).c_str());
+	}
 
 	if (bind(ohm_fd, (struct sockaddr *) &src, sizeof(src)) < 0)
 		goto fail_ohm;
 
 	if (!unicast) {
-		mreq.imr_multiaddr.s_addr = inet_addr((std::string("239.255.") + std::to_string(channel)).c_str());
+		mreq.imr_multiaddr = src.sin_addr;
+
 		if (setsockopt(ohm_fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0)
 			goto fail_ohm;
 
-		receiver = {};
-		receiver.sin_family = AF_INET;
-		receiver.sin_port = htons(51973);
-		receiver.sin_addr = mreq.imr_multiaddr;
+		receiver = src;
 	}
 
 	state = WAITING;
@@ -467,15 +547,19 @@ void SongcastOutput::handle_ohm()
 
   // TODO we only ever expect the header... so just receive into that struct directly
   ohm1_header header;
-	struct iovec iov[1] = {};
+	uint8_t buffer[2048];
+
+	struct iovec iov[2] = {};
 	iov[0].iov_base = &header;
 	iov[0].iov_len = sizeof(header);
+	iov[1].iov_base = buffer;
+	iov[1].iov_len = sizeof(buffer);
 
 	struct msghdr message = {
 		message.msg_name = &src_addr,
 		message.msg_namelen = sizeof(src_addr),
 		message.msg_iov = iov,
-		message.msg_iovlen = 1,
+		message.msg_iovlen = 2,
 		message.msg_control = 0,
 		message.msg_controllen = 0,
 	};
@@ -519,6 +603,25 @@ void SongcastOutput::handle_ohm()
 			// ignore
 		}
 	}
+
+	if (header.type == OHM1_FRAME_REQUEST) {
+		ohm1_frame_request *request = (ohm1_frame_request*)buffer;
+		int count = ntohl(request->count);
+
+		printf("resent request %i\n", count);
+
+		for (int i = 0; i < count; i++)
+			handle_resent_request(ntohl(request->data[i]));
+	}
+
+	// TODO handle type 7 (probably resent request)
+	// TODO keep a history of all sent packets within the latency
+	//      a fast ringbuffer may be useful
+	//      this buffer can probably be static
+	//      chunking the audio to fit into MTU may be helpful here
+	//      to haven an upper bound for how much memory will be
+	//      needed reduce the potential packet loss
+	//      std::deque with a list of pointers to frames?
 
   // share sendmsg for track and metatext with unicast and multicast
 
@@ -599,6 +702,7 @@ bool
 SongcastOutput::Open(AudioFormat &audio_format, Error &error)
 {
 	PcmExport::Params params;
+	params.pack24 = true;
 	int bitdepth;
 
 	switch (audio_format.format) {
@@ -609,8 +713,7 @@ SongcastOutput::Open(AudioFormat &audio_format, Error &error)
 		case SampleFormat::S24_P32:
 		default:
 			audio_format.format = SampleFormat::S24_P32;
-			params.reverse_endian = 3;
-			params.pack24 = true;
+			params.reverse_endian = 4;
 			bitdepth = 24;
 			break;
 	}
@@ -624,16 +727,28 @@ SongcastOutput::Open(AudioFormat &audio_format, Error &error)
 			break;
 	}
 
-	frame = {};
-	frame.audio_hdr_length = 50;
-	frame.codec_length = 3;
-	frame.channels = audio_format.channels;
-	frame.sample_rate = htonl(audio_format.sample_rate);
-	frame.bitdepth = bitdepth;
-	frame.media_latency = htonl(latency_ms_to_media(audio_format.sample_rate, latency));
+	frame_options = {};
+	frame_options.channels = audio_format.channels;
+	frame_options.sample_rate = audio_format.sample_rate;
+	frame_options.bitdepth = bitdepth;
+	frame_options.media_latency = latency_ms_to_media(audio_format.sample_rate, latency);
+	frame_options.codec = "PCM";
 
 	pcm_export->Open(audio_format.format, audio_format.channels, params);
-	framesize = pcm_export->GetFrameSize(audio_format);
+	in_frame_size = audio_format.GetFrameSize();
+	out_frame_size = pcm_export->GetFrameSize(audio_format);
+
+	size_t target = 1500 - sizeof(ohm1_header) - sizeof(ohm1_audio) - frame_options.codec.length();
+	target = (target / out_frame_size) * in_frame_size;
+
+	for (chunk_size = in_frame_size; 2 * chunk_size < target;)
+		chunk_size *= 2;
+
+	size_t nentries = (audio_format.sample_rate * out_frame_size * latency) / (chunk_size * 1000);
+
+	size_t cache_size = sizeof(struct cached_frame) + chunk_size;
+	cache = (struct cached_frame *)malloc(cache_size);
+	ringbuffer.resize(nentries, cache_size);
 
 	timer = new Timer(audio_format);
 
@@ -643,40 +758,21 @@ SongcastOutput::Open(AudioFormat &audio_format, Error &error)
 void
 SongcastOutput::Close()
 {
-
 	printf("Sending halt frame\n");
-	frame.flags = OHM1_FLAG_HALT;
-	frame.sample_count = htons(0);
-	frame.frame = htonl(framecounter++);
 
-	ohm1_header header;
+	// TODO build a wrapper for send_audio_frame, put into buffer, increment framecounter
+	cache->index = framecounter;
+	cache->flags = OHM1_FLAG_HALT;
+	cache->options = frame_options;
+	cache->chunk_size = 0;
+	ringbuffer.put(cache);
 
-	memcpy(&header.signature, "Ohm ", 4);
-	header.version = 1;
-	header.type = OHM1_AUDIO;
-	header.length = htons(sizeof(header) + sizeof(frame) + strlen(codec));
+	send_audio_frame(framecounter, NULL, 0, &frame_options, OHM1_FLAG_HALT);
+	framecounter++;
 
-	struct iovec iov[3] = {};
-	iov[0].iov_base = &header;
-	iov[0].iov_len = sizeof(header);
-	iov[1].iov_base = &frame;
-	iov[1].iov_len = sizeof(frame);
-	iov[2].iov_base = (void *)codec;
-	iov[2].iov_len = strlen(codec);
-
-	struct msghdr message = {};
-	message.msg_name = &receiver;
-	message.msg_namelen = sizeof(receiver);
-	message.msg_iov = iov;
-	message.msg_iovlen = 3;
-	message.msg_control = 0;
-	message.msg_controllen = 0;
-
-	sendmsg(ohm_fd, &message, 0);
-	// TODO send halt frame with no further audio data
 	// reset track and metatext to dummy
+	free(cache);
 	delete timer;
-
 }
 
 unsigned
@@ -691,34 +787,90 @@ SongcastOutput::Play(const void *chunk, size_t size, gcc_unused Error &error)
 	if (!timer->IsStarted())
 		timer->Start();
 
-	timer->Add(size);
-
-	// Discard when no receiver is listening
-	if (state != ALIVE)
-		return size;
+	size = chunk_size > size ? size : chunk_size;
 
 	const auto e = pcm_export->Export({chunk, size});
 	chunk = e.data;
 	size = e.size;
 
-	frame.flags = 0;
-	frame.sample_count = htons(size / framesize);
-	frame.frame = htonl(framecounter++);
+	size_t source_size = pcm_export->CalcSourceSize(size);
+
+	timer->Add(source_size);
+
+	// Discard when no receiver is listening
+	if (state != ALIVE)
+		return source_size;
+
+		cache->index = framecounter;
+		cache->flags = 0;
+		cache->options = frame_options;
+		cache->chunk_size = size;
+		memcpy(cache->chunk, chunk, size);
+		ringbuffer.put(cache);
+
+	send_audio_frame(framecounter, chunk, size, &frame_options, 0);
+
+	framecounter++;
+
+	return source_size;
+}
+
+inline void
+SongcastOutput::Cancel()
+{
+	// calculate how many frames have been sent within latency
+	// resent them with halt flag set and no data
+
+	// This seems to confuse the DSM.
+	return;
+}
+
+void
+SongcastOutput::handle_resent_request(unsigned int frameindex)
+{
+	struct cached_frame *frame = ringbuffer.get(frameindex);
+	if (frame == nullptr) {
+		printf("can't handle %i (age %i)\n", frameindex, framecounter - frameindex);
+		return;
+	}
+
+	send_audio_frame(frame->index, frame->chunk, frame->chunk_size, &frame->options, frame->flags | OHM1_FLAG_RESENT);
+
+	printf("%i -> %i\n", frameindex, frame->index);
+	free(frame);
+	// get from buffer
+	// call send_audio_frame
+}
+
+void
+SongcastOutput::send_audio_frame(unsigned int frameindex, const void *chunk,
+	size_t size, struct audio_frame_options *options, uint8_t flags)
+{
+	ohm1_audio frame = {};
+	frame.channels = options->channels;
+	frame.sample_rate = htonl(options->sample_rate);
+	frame.bitdepth = options->bitdepth;
+	frame.media_latency = htonl(options->media_latency);
+	frame.audio_hdr_length = 50;
+	frame.codec_length = options->codec.length();
+	frame.flags = flags;
+	frame.sample_count = htons(size / out_frame_size);
+	frame.frame = htonl(frameindex);
 
 	ohm1_header header;
 
 	memcpy(&header.signature, "Ohm ", 4);
 	header.version = 1;
 	header.type = OHM1_AUDIO;
-	header.length = htons(sizeof(header) + sizeof(frame) + strlen(codec) + size);
+	header.length = htons(sizeof(header) + sizeof(frame) + options->codec.length() + size);
 
 	struct iovec iov[4] = {};
 	iov[0].iov_base = &header;
 	iov[0].iov_len = sizeof(header);
 	iov[1].iov_base = &frame;
 	iov[1].iov_len = sizeof(frame);
-	iov[2].iov_base = (void *)codec;
-	iov[2].iov_len = strlen(codec);
+	iov[2].iov_base = (void *)options->codec.c_str();
+	iov[2].iov_len = options->codec.length();
 	iov[3].iov_base = (void *)chunk;
 	iov[3].iov_len = size;
 
@@ -731,53 +883,6 @@ SongcastOutput::Play(const void *chunk, size_t size, gcc_unused Error &error)
 	message.msg_controllen = 0;
 
 	sendmsg(ohm_fd, &message, 0);
-
-	return pcm_export->CalcSourceSize(size);
-}
-
-inline void
-SongcastOutput::Cancel()
-{
-	// calculate how many frames have been sent within latency
-	// resent them with halt flag set and no data
-
-	// This seems to confuse the DSM.
-	return;
-
-	int start = framecounter - 200;
-	printf("start %i\n", start);
-	framecounter++;
-
-	for (int i = framecounter; i > start ; i--) {
-		frame.flags = OHM1_FLAG_HALT | OHM1_FLAG_RESENT;
-		frame.sample_count = htons(0);
-		frame.frame = htonl(i);
-
-		ohm1_header header;
-
-		memcpy(&header.signature, "Ohm ", 4);
-		header.version = 1;
-		header.type = OHM1_AUDIO;
-		header.length = htons(sizeof(header) + sizeof(frame) + strlen(codec));
-
-		struct iovec iov[3] = {};
-		iov[0].iov_base = &header;
-		iov[0].iov_len = sizeof(header);
-		iov[1].iov_base = &frame;
-		iov[1].iov_len = sizeof(frame);
-		iov[2].iov_base = (void *)codec;
-		iov[2].iov_len = strlen(codec);
-
-		struct msghdr message = {};
-		message.msg_name = &receiver;
-		message.msg_namelen = sizeof(receiver);
-		message.msg_iov = iov;
-		message.msg_iovlen = 3;
-		message.msg_control = 0;
-		message.msg_controllen = 0;
-
-		sendmsg(ohm_fd, &message, 0);
-	}
 }
 
 // TODO remove/refactor/whatever

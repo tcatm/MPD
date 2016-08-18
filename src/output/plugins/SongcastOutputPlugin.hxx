@@ -19,6 +19,8 @@
 
 #ifndef MPD_SONGCAST_OUTPUT_PLUGIN_HXX
 #define MPD_SONGCAST_OUTPUT_PLUGIN_HXX
+
+#include <string>
 #include <stdint.h>
 
 extern const struct AudioOutputPlugin songcast_output_plugin;
@@ -39,12 +41,12 @@ typedef struct __attribute__((__packed__)) {
 	uint16_t length;
 } ohz1_header;
 
-typedef struct __attribute__((__packed__))  {
+typedef struct __attribute__((__packed__))	{
 	uint32_t length;
-  char zone[];
+	char zone[];
 } ohz1_zone_query;
 
-typedef struct __attribute__((__packed__))  {
+typedef struct __attribute__((__packed__))	{
 	uint32_t zone_length;
 	uint32_t uri_length;
 } ohz1_zone_uri;
@@ -61,13 +63,14 @@ typedef struct __attribute__((__packed__)) {
 // OHM
 
 enum {
-  OHM1_JOIN = 0,
-  OHM1_LISTEN,
-  OHM1_LEAVE,
-  OHM1_AUDIO,
-  OHM1_TRACK,
-  OHM1_METATEXT,
-  OHM1_SLAVE
+	OHM1_JOIN = 0,
+	OHM1_LISTEN,
+	OHM1_LEAVE,
+	OHM1_AUDIO,
+	OHM1_TRACK,
+	OHM1_METATEXT,
+	OHM1_SLAVE,
+	OHM1_FRAME_REQUEST,
 };
 
 #define OHM1_FLAG_HALT (1<<0)
@@ -76,54 +79,74 @@ enum {
 #define OHM1_FLAG_RESENT (1<<3)
 
 typedef struct __attribute__((__packed__)) {
-  uint8_t signature[4];
-  uint8_t version;
-  uint8_t type;
-  uint16_t length;
+	uint8_t signature[4];
+	uint8_t version;
+	uint8_t type;
+	uint16_t length;
 } ohm1_header;
 
 typedef struct __attribute__((__packed__)) {
-  uint8_t audio_hdr_length;
-  uint8_t flags;
-  uint16_t sample_count;
-  uint32_t frame;
-  uint32_t network_timestamp;
-  uint32_t media_latency;
-  uint32_t media_timestamp;
-  uint64_t start_sample;
-  uint64_t total_samples;
-  uint32_t sample_rate;
-  uint32_t bitrate;
-  uint16_t volume_offset;
-  uint8_t bitdepth;
-  uint8_t channels;
-  uint8_t reserved;
-  uint8_t codec_length;
-  uint8_t data[];
+	uint8_t audio_hdr_length;
+	uint8_t flags;
+	uint16_t sample_count;
+	uint32_t frame;
+	uint32_t network_timestamp;
+	uint32_t media_latency;
+	uint32_t media_timestamp;
+	uint64_t start_sample;
+	uint64_t total_samples;
+	uint32_t sample_rate;
+	uint32_t bitrate;
+	uint16_t volume_offset;
+	uint8_t bitdepth;
+	uint8_t channels;
+	uint8_t reserved;
+	uint8_t codec_length;
+	uint8_t data[];
 } ohm1_audio;
 
 typedef struct __attribute__((__packed__)) {
-  uint32_t sequence;
-  uint32_t uri_length;
-  uint32_t metadata_length;
-  uint8_t data[];
+	uint32_t sequence;
+	uint32_t uri_length;
+	uint32_t metadata_length;
+	uint8_t data[];
 } ohm1_track;
 
 typedef struct __attribute__((__packed__)) {
-  uint32_t sequence;
-  uint32_t length;
-  uint8_t data[];
+	uint32_t sequence;
+	uint32_t length;
+	uint8_t data[];
 } ohm1_metatext;
 
 typedef struct __attribute__((__packed__)) {
-  uint32_t addr;
-  uint16_t port;
+	uint32_t addr;
+	uint16_t port;
 } ohm1_slave_entry;
 
 typedef struct __attribute__((__packed__)) {
-  ohm1_header hdr;
-  uint32_t count;
-  ohm1_slave_entry slaves[];
+	uint32_t count;
+	ohm1_slave_entry slaves[];
 } ohm1_slave;
+
+typedef struct __attribute__((__packed__)) {
+	uint32_t count;
+	uint32_t data[];
+} ohm1_frame_request;
+
+struct audio_frame_options {
+	int channels;
+	unsigned int sample_rate;
+	int bitdepth;
+	unsigned int media_latency;
+	std::string codec;
+};
+
+struct cached_frame {
+	int index;
+	int flags;
+	audio_frame_options options;
+	size_t chunk_size;
+	uint8_t chunk[];
+};
 
 #endif
