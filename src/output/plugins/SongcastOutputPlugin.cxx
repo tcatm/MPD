@@ -191,6 +191,7 @@ struct SongcastOutput final {
 
 	int ohz_fd;
 	int ohm_fd;
+	int shutdown_fd[2];
 
 	Timer *timer;
 
@@ -322,6 +323,8 @@ SongcastOutput::Enable(Error &error)
 
 	// TODO reset track and metatext to dummy
 
+	pipe(shutdown_fd);
+
 	t = std::thread(&SongcastOutput::ohz_thread, this);
 
 	return true;
@@ -337,14 +340,20 @@ fail_ohz:
 inline void
 SongcastOutput::Disable()
 {
+	printf("Shutting down SongcastOutput\n");
 	// send event to thread
+	int buffer = 0;
+	write(shutdown_fd[1], &buffer, sizeof(buffer));
+
+	t.join();
+
+	close(ohz_fd);
+	close(ohm_fd);
+	close(shutdown_fd[0]);
+	close(shutdown_fd[1]);
 
 	pcm_export.Destruct();
 
-	// TODO stop ohz_thread
-	// TODO join ohz_thread
-	close(ohz_fd);
-	close(ohm_fd);
 }
 
 void add_fd(int efd, int fd, uint32_t events) {
@@ -651,6 +660,7 @@ void SongcastOutput::ohz_thread()
 	efd = epoll_create1(0);
 	add_fd(efd, ohz_fd, EPOLLIN);
 	add_fd(efd, ohm_fd, EPOLLIN);
+	add_fd(efd, shutdown_fd[0], EPOLLIN);
 
 	events = (epoll_event*)calloc(maxevents, sizeof(struct epoll_event));
 	while (1) {
@@ -670,8 +680,19 @@ void SongcastOutput::ohz_thread()
 
 				if (ohm_fd == events[i].data.fd && events[i].events & EPOLLIN)
 					handle_ohm();
+
+				if (shutdown_fd[0] == events[i].data.fd && events[i].events & EPOLLIN) {
+					int buffer;
+					int r = read(shutdown_fd[0], &buffer, sizeof(buffer));
+					printf("Got %i\n", r);
+					goto exit_ohz;
+				}
 			}
 		}
+
+exit_ohz:
+
+		printf("Shutting down ohz_thread\n");
 
 		free(events);
 
