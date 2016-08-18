@@ -138,7 +138,7 @@ struct audio_frame_options {
 	unsigned int sample_rate;
 	int bitdepth;
 	unsigned int media_latency;
-	std::string codec;
+	const char *codec;
 };
 
 struct cached_frame {

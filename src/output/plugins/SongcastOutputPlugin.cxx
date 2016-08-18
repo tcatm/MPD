@@ -738,7 +738,7 @@ SongcastOutput::Open(AudioFormat &audio_format, Error &error)
 	in_frame_size = audio_format.GetFrameSize();
 	out_frame_size = pcm_export->GetFrameSize(audio_format);
 
-	size_t target = 1500 - sizeof(ohm1_header) - sizeof(ohm1_audio) - frame_options.codec.length();
+	size_t target = 1500 - sizeof(ohm1_header) - sizeof(ohm1_audio) - strlen(frame_options.codec);
 	target = (target / out_frame_size) * in_frame_size;
 
 	for (chunk_size = in_frame_size; 2 * chunk_size < target;)
@@ -852,7 +852,7 @@ SongcastOutput::send_audio_frame(unsigned int frameindex, const void *chunk,
 	frame.bitdepth = options->bitdepth;
 	frame.media_latency = htonl(options->media_latency);
 	frame.audio_hdr_length = 50;
-	frame.codec_length = options->codec.length();
+	frame.codec_length = strlen(options->codec);
 	frame.flags = flags;
 	frame.sample_count = htons(size / out_frame_size);
 	frame.frame = htonl(frameindex);
@@ -862,15 +862,15 @@ SongcastOutput::send_audio_frame(unsigned int frameindex, const void *chunk,
 	memcpy(&header.signature, "Ohm ", 4);
 	header.version = 1;
 	header.type = OHM1_AUDIO;
-	header.length = htons(sizeof(header) + sizeof(frame) + options->codec.length() + size);
+	header.length = htons(sizeof(header) + sizeof(frame) + strlen(options->codec) + size);
 
 	struct iovec iov[4] = {};
 	iov[0].iov_base = &header;
 	iov[0].iov_len = sizeof(header);
 	iov[1].iov_base = &frame;
 	iov[1].iov_len = sizeof(frame);
-	iov[2].iov_base = (void *)options->codec.c_str();
-	iov[2].iov_len = options->codec.length();
+	iov[2].iov_base = (void *)options->codec;
+	iov[2].iov_len = strlen(options->codec);
 	iov[3].iov_base = (void *)chunk;
 	iov[3].iov_len = size;
 
